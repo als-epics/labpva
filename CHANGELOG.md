@@ -1,5 +1,55 @@
 # labpva changelog
 
+## 2026-08-12 — PVXS backend: warm puts are ~6x faster (one round-trip, like pvac)
+
+A `PVXS=...` build was far slower at repeated puts than a classic build — a user
+loop of `pvaPut(pvlist, [0;0;0])` over 3 PVs x 10000 iterations took 27.2 s on
+PVXS versus 4.4 s on pvAccessCPP. Cause: **round-trips per put**, not PVXS
+itself. A pvxs `client::Operation` is a one-shot state machine, so each
+`pvaPut` paid a get (INIT + GET, just to learn the channel's type) *plus* a put
+(INIT + PUT) = ~4 server round-trips, where pvaClient's cached `PvaClientPut`
+needs 1. Measured per warm scalar put on a loopback softIocPVA: 250 µs (old
+PVXS shape) vs 32 µs (pvac).
+
+Both halves are fixed, in the glue only — no MATLAB-visible behaviour change:
+
+- **The pre-put get is gone.** `pvaPutPrototype` (new, `pvaGlue.h`) hands the
+  MEX layer the channel's type description to build the argument against;
+  `mxToPutArg`/`mxToPutArgStructure` take it as `proto`. Only an enum channel
+  needs values (its choice list), and those are fetched once per INIT.
+- **One put Operation is cached per channel** (`g_putOps` in
+  `pvaGlue_pvxs.cpp`), created with the pvxs expert API's `.autoExec(false)` +
+  `.onInit(...)`; each later put is a single `Operation::reExecPut`.
+  `pvaPutExec` sends the pre-built argument through it.
+
+Result: **41 µs per warm put** (6.1x faster, parity with pvac's 32 µs), and one
+round-trip per put on the wire. The classic backend is untouched; the read path
+is unchanged (`pvaGet` still creates a Get per call — same optimisation applies,
+not done here).
+
+Robustness of the cache (all verified live, 22/22 harness checks — scalar /
+waveform / string / enum-by-choice / boolean puts, whole-structure put,
+`pvaPutNoWait`, no-wait burst, nonexistent PV, IOC restart):
+
+- `.onInit` re-fires after a reconnect and bumps a generation counter, so an
+  **IOC restart** — even one that changes the channel's type — refreshes the
+  cached prototype with no user action.
+- `reExecPut` silently does nothing unless the operation is idle, so a put
+  already in flight on that channel (a preceding `pvaPutNoWait`), a
+  disconnected channel, or a pvxs too old for the expert API all **fall back**
+  to the previous one-shot put rather than dropping the write. The fallback's
+  whole-structure pvRequest matches the fallback prototype's layout.
+- A `wait` put whose completion never arrives drops the cached operation and
+  reports `pvaPut '<name>': timeout` (the next call rebuilds it). A put to an
+  unreachable channel now reports `pvaPut '<name>': Timeout`, matching the
+  classic backend's wording.
+- Callbacks still run on pvxs worker threads and still never touch MATLAB
+  memory: they copy a `Value`/string, set a flag, signal an `epicsEvent`.
+
+Requires pvxs >= 1.3 for the cached path (`PVXS_ENABLE_EXPERT_API`, defined
+ahead of every pvxs header); older pvxs compiles the registry out and keeps the
+old one-shot behaviour.
+
 ## 2026-08-10 — pvaPut/pvaPutNoWait: single-value broadcast over a list of PVs
 
 `pvaPut({'PV1','PV2',...}, value)` now accepts **one** value and writes it to
@@ -87,7 +137,9 @@ event after a put → cache-served pvaGet → clear; NOMONITOR error preserved).
 Design notes:
 - Puts pre-build the argument Value on the MATLAB thread (`mxToPutArg` /
   `mxToPutArgStructure` in pvaConvert_pvxs.cpp): a fresh get supplies the
-  server type (and enum choices), the argument starts as `cloneEmpty()` and
+  server type (and enum choices) — *superseded 2026-08-12: the type now comes
+  from a cached put operation's INIT, with no get* — the argument starts as
+  `cloneEmpty()` and
   assignment marks exactly the written fields — pvxs sends only marked fields.
   The PutBuilder callback (a pvxs worker thread) only returns the pre-built
   Value; it never touches MATLAB memory.

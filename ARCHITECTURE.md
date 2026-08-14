@@ -254,6 +254,26 @@ the put. A warm `pvaPut` therefore costs a single round-trip (the write itself;
 `pvaPutNoWait` doesn't even wait for the ack), and a warm `pvaGet` a single read
 round-trip. No per-call channel/handle re-creation.
 
+**The same, on the PVXS backend.** pvxs has no equivalent handle cache: a
+`client::Operation` is a one-shot state machine (`Connecting → Creating(INIT) →
+Exec → Done`), so the naive shape — build a Put per call — pays INIT + EXEC
+*per put*, and a pre-put get for the type doubles that again. `pvaGlue_pvxs.cpp`
+therefore keeps its own registry (`g_putOps`, one entry per channel) of put
+Operations created with the expert API's `.autoExec(false)` + `.onInit(...)`:
+INIT happens once, `onInit` records the server's type description as the
+prototype, and each later put is a single `Operation::reExecPut(arg, cb)` — one
+round-trip, parity with the classic backend (measured 41 µs vs 32 µs per warm
+scalar put on a loopback IOC, against 250 µs for the un-cached shape). The
+prototype is what `pvaPutPrototype` hands the MEX layer to build the argument
+against, which is why the pre-put get is gone: `mxToPutArg` needs the channel's
+*type*, and only an enum channel needs *values* (its choice list), fetched once
+per INIT with `reExecGet` on that same operation. `onInit` re-fires after a
+reconnect, so an IOC restart (even with a changed type) refreshes the prototype
+by itself. Whenever the cached operation is unusable — a put already in flight
+on that channel, a disconnected channel, or a pvxs too old for the expert API
+(`LABPVA_PVXS_CACHED_PUT`) — the code falls back to the original one-shot put,
+whose whole-structure pvRequest matches the fallback prototype's layout.
+
 ## 6b. Build & API-mode notes
 
 - The build uses the standard EPICS `configure/` layout (like labca): external
