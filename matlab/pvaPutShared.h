@@ -5,10 +5,11 @@
  * each channel's structure; use pvaPutStructure for whole-structure writes.
  *
  * The MATLAB argument handling is backend-neutral; only the "perform the put"
- * step differs: the classic backend uses pvaClient's cached put handles
- * (pvaPutPrepare/pvaPutCommit + mxToPvValue), the PVXS backend pre-builds an
- * argument Value from a fresh get (mxToPutArg) and sends its marked fields
- * (pvaPutExec).
+ * step differs, though both shapes are the same two steps against a cached,
+ * connected put: the classic backend fills in pvaClient's cached put handle
+ * (pvaPutPrepare/pvaPutCommit + mxToPvValue), the PVXS backend builds an
+ * argument Value against the channel's type (pvaPutPrototype + mxToPutArg) and
+ * sends its marked fields (pvaPutExec).
  */
 #ifndef LABPVA_PUT_SHARED_H
 #define LABPVA_PUT_SHARED_H
@@ -149,11 +150,12 @@ pvaPutMexBody(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[], bool w
         const mxArray *vmx = putValueFor(valArg, i, n, wasCell, &scratch, err);
         if (err.err != PVA_OK) break;
 
-        /* Fresh get supplies the server's type (and enum choices) so the put
-         * argument can be built here, on the MATLAB thread. */
-        PvValue cur = pvaGet(pvs[i], "field()", err);
+        /* The channel's type (and, for an enum, its choices) so the put
+         * argument can be built here, on the MATLAB thread. Cached per channel
+         * by the glue, so this costs no round trip after the first put. */
+        PvValue proto = pvaPutPrototype(pvs[i], err);
         if (err.err == PVA_OK) {
-            PvValue arg = mxToPutArg(vmx, cur, type, err);
+            PvValue arg = mxToPutArg(vmx, proto, type, err);
             if (err.err == PVA_OK)
                 pvaPutExec(pvs[i], arg, wait, err);
         }

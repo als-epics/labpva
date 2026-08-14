@@ -91,13 +91,25 @@ pvaPutPrepare(const std::string &name, const std::string &request, PvaError &err
 void pvaPutCommit(const epics::pvaClient::PvaClientPutPtr &put,
                   std::size_t changedFieldOffset, bool wait, PvaError &err);
 #else
-/* ---- write path (PVXS backend) --------------------------------------- */
+/* ---- write path (PVXS backend) ---------------------------------------
+ * Two steps, like the classic backend's pvaPutPrepare/pvaPutCommit: get the
+ * channel's type, build the argument against it (on the MATLAB thread), send
+ * it. CALL THEM AS A PAIR for one channel -- pvaPutExec sends `arg` field by
+ * marked field with no type description of its own, so it must have been built
+ * against the layout pvaPutPrototype just returned. */
+
+/* The channel's type description, as the authority mxToPutArg* builds a put
+ * argument against (for an enum channel it also carries the choice list). Costs
+ * no round trip once the channel's put operation is cached -- see the write
+ * section of pvaGlue_pvxs.cpp. Returns an invalid Value with `err` set if the
+ * channel cannot be reached. */
+PvValue pvaPutPrototype(const std::string &name, PvaError &err);
 
 /* Execute a put of a pre-built argument Value (see pvaConvert.h mxToPutArg*):
  * only the MARKED fields of `arg` are sent; the server keeps the rest. `wait`
- * true blocks for completion (lcaPut); false is fire-and-forget (the pending
- * operation is parked internally so it is not cancelled, and reaped once its
- * completion callback fires). */
+ * true blocks for completion (lcaPut); false is fire-and-forget (a cached
+ * operation just leaves it in flight; a one-shot operation is parked internally
+ * so it is not cancelled, and reaped once its completion callback fires). */
 void pvaPutExec(const std::string &name, const PvValue &arg, bool wait, PvaError &err);
 #endif /* !LABPVA_USE_PVXS */
 

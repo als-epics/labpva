@@ -5,12 +5,21 @@
  * created from the EPICS_PVA_* environment, a channel registry of
  * client::Connect handles (backs pvaChannels / pvaIsConnected), monitors via
  * client::Subscription with the same drain-keep-latest cache semantics, and
- * puts via the PutBuilder (the argument Value is pre-built on the MATLAB
- * thread -- see pvaConvert.h -- so no callback ever touches MATLAB memory).
+ * puts through a per-channel cached put Operation (see the write section: the
+ * argument Value is built on the MATLAB thread -- pvaConvert.h -- so no
+ * callback ever touches MATLAB memory).
  *
  * NOTE: PVXS implements pvAccess only -- there is no Channel Access provider,
  * so pvaSetProvider('ca') is refused (use labca for record.FIELD access).
  */
+
+/* Enables pvxs's "expert" client API (Operation::reExecPut, PutBuilder's
+ * autoExec/onInit) -- the put cache in the write section below needs it. Must
+ * precede every pvxs header, since pvxs/version.h latches the gate on its
+ * first inclusion. Where the API is missing the write path still compiles and
+ * falls back to one operation per put (see LABPVA_PVXS_CACHED_PUT). */
+#define PVXS_ENABLE_EXPERT_API
+
 #include "pvaGlue.h"
 
 #include <pvxs/client.h>
@@ -274,11 +283,36 @@ std::vector<std::string> pvaMonitorNames()
 
 /* ---- write ------------------------------------------------------------ */
 
+/* Two paths, both sending an argument Value built on the MATLAB thread:
+ *
+ *  - the CACHED path (below): one long-lived put Operation per channel, the
+ *    analogue of pvaClient's put cache (PvaClientChannel::put() hands back a
+ *    connected PvaClientPut, so a repeated put is a single round trip). A pvxs
+ *    Operation is one-shot unless created with .autoExec(false), which leaves
+ *    it Idle after each execution to be re-run with reExecPut(). Caching it
+ *    pays the operation INIT once per channel instead of once per put, and the
+ *    INIT reply is also the server's type description -- which is all a put
+ *    argument must be built against, so the pre-put get the MEX layer used to
+ *    do (one more operation, two more round trips) disappears as well. A warm
+ *    pvaPut therefore costs one round trip, matching the classic backend.
+ *
+ *  - the ONE-SHOT path (pvaPutExec's tail): a fresh Operation per put, used
+ *    when the cached one is unusable -- no INIT yet, a no-wait put still in
+ *    flight on that channel, a disconnected channel, or a pvxs too old for the
+ *    expert API. Correct, just 2 round trips.
+ *
+ * Neither path ever touches MATLAB memory from a pvxs worker thread. */
+
+#if defined(PVXS_EXPERT_API_ENABLED) && PVXS_VERSION >= VERSION_INT(1,3,0,0)
+#  define LABPVA_PVXS_CACHED_PUT
+#endif
+
 /* A pvxs Operation is cancelled when its handle is dropped, so a fire-and-
  * forget put (pvaPutNoWait) must park its handle until completion. The result
  * callback (on a PVXS worker thread) only records the key of a finished put;
  * the handle itself is destroyed later, on the MATLAB thread, by reapDonePuts
- * -- never from inside its own callback. */
+ * -- never from inside its own callback. (Only the one-shot path needs this:
+ * a cached operation is owned by the registry, so nothing can cancel it.) */
 static std::mutex g_putLock;
 static std::map<unsigned long long, std::shared_ptr<client::Operation> > g_pendingPuts;
 static std::vector<unsigned long long> g_donePuts;
@@ -315,16 +349,296 @@ static void reapDonePuts()
      * operations are already complete so destruction cancels nothing */
 }
 
+#ifdef LABPVA_PVXS_CACHED_PUT
+
+/* State shared with the PVXS worker threads that run a cached operation's
+ * onInit and put-result callbacks. Held by shared_ptr so a callback that fires
+ * after the entry has been dropped still has somewhere safe to write. Those
+ * callbacks only take this lock, copy a Value / an error string, and signal --
+ * no MATLAB memory, no blocking, nothing destroyed. */
+struct PutSlot {
+    std::mutex   lock;
+    epicsEvent   initEvt;   /* signalled by onInit                            */
+    epicsEvent   doneEvt;   /* signalled when an issued put completes          */
+    Value        proto;     /* server's type description, from the INIT reply  */
+    unsigned long gen;      /* bumped on every (re)INIT -- see argGen below    */
+    bool         busy;      /* a reExecPut is in flight                        */
+    bool         invalid;   /* the operation must be rebuilt before reuse     */
+    bool         failed;    /* it reported an error ...                        */
+    std::string  msg;       /* ... with this message                           */
+    PutSlot() : gen(0), busy(false), invalid(false), failed(false) {}
+};
+
+struct PutEntry {
+    std::shared_ptr<client::Operation> op;
+    std::shared_ptr<PutSlot>           slot;
+    /* What the MEX layer builds its argument against: `slot->proto` as-is,
+     * except for an enum channel, where it is a value-carrying fetch (the
+     * choice list is needed to map a choice string to an index, and a type
+     * description does not carry it). Derived on the MATLAB thread and tagged
+     * with the generation it came from, so an IOC restart that re-INITs with a
+     * different type rebuilds it instead of writing against a stale layout. */
+    Value         argProto;
+    unsigned long argGen;
+    PutEntry() : argGen(0) {}
+};
+
+static std::map<std::string, PutEntry> g_putOps;
+
+/* Forget a channel's cached operation; the next put rebuilds it. */
+static void dropPutEntry(const std::string &name)
+{
+    std::map<std::string, PutEntry>::iterator it = g_putOps.find(name);
+    if (it == g_putOps.end()) return;
+    std::shared_ptr<client::Operation> op(it->second.op);
+    g_putOps.erase(it);
+    /* op destructs here, on the MATLAB thread, cancelling the operation */
+}
+
+static bool valueIsEnum(const Value &v)
+{
+    if (!v || v.type().code != TypeCode::Struct) return false;
+    try { return v.id() == "enum_t"; } catch (std::exception &) { return false; }
+}
+
+/* Read the channel's current value through the cached put operation itself
+ * (reExecGet on a Put issues the pvAccess put-get subcommand, exactly what
+ * pvaClient's put does when it connects). Using the put's own operation
+ * guarantees the returned Value has the layout reExecPut will send. Blocks on
+ * the MATLAB thread; an invalid Value means "unavailable". */
+static Value putOpGet(PutEntry &e, double timeout)
+{
+    std::shared_ptr<epicsEvent> evt(new epicsEvent());
+    std::shared_ptr<Value>      out(new Value());
+    std::shared_ptr<PutSlot>    slot(e.slot);
+    try {
+        e.op->reExecGet([evt, out, slot](client::Result &&r) {
+            try { *out = r(); }
+            catch (std::exception &) {
+                std::lock_guard<std::mutex> G(slot->lock);
+                slot->invalid = true;
+            }
+            evt->signal();
+        });
+    } catch (std::exception &) {
+        std::lock_guard<std::mutex> G(slot->lock);
+        slot->invalid = true;
+        return Value();
+    }
+    if (!evt->wait(timeout)) {
+        std::lock_guard<std::mutex> G(slot->lock);
+        slot->invalid = true;
+        return Value();                    /* also covers "was not Idle" */
+    }
+    if (!*out) {
+        std::lock_guard<std::mutex> G(slot->lock);
+        slot->invalid = true;
+    }
+    return *out;
+}
+
+/* The cached put operation for `name` with its INIT complete, creating it on
+ * first use. NULL means "use the one-shot path" -- the channel did not answer
+ * in time, or an enum's choice list could not be read. */
+static PutEntry *readyPutEntry(const std::string &name)
+{
+    std::map<std::string, PutEntry>::iterator it = g_putOps.find(name);
+    if (it != g_putOps.end()) {
+        bool invalid;
+        {
+            std::lock_guard<std::mutex> G(it->second.slot->lock);
+            invalid = it->second.slot->invalid;
+        }
+        if (invalid) {
+            dropPutEntry(name);
+            it = g_putOps.end();
+        }
+    }
+    if (it == g_putOps.end()) {
+        PutEntry e;
+        e.slot.reset(new PutSlot());
+        std::shared_ptr<PutSlot> slot(e.slot);
+        try {
+            e.op = context().put(name)
+                       .fetchPresent(false)   /* the argument is already built */
+                       .autoExec(false)       /* we drive it with reExecPut    */
+                       .onInit([slot](const Value &proto) {
+                            std::lock_guard<std::mutex> G(slot->lock);
+                            slot->proto = proto;
+                            ++slot->gen;
+                            slot->initEvt.signal();
+                        })
+                       /* never called while autoExec is false (reExecPut
+                        * installs its own), but PutBuilder wants a builder */
+                       .build([](Value &&v) -> Value { return v; })
+                       .exec();
+        } catch (std::exception &) { return NULL; }
+        it = g_putOps.insert(std::make_pair(name, e)).first;
+    }
+    PutEntry &e = it->second;
+
+    /* Wait out the INIT round trip -- the one this scheme pays per channel
+     * (and again after a reconnect). */
+    Value         proto;
+    unsigned long gen = 0;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        {
+            std::lock_guard<std::mutex> G(e.slot->lock);
+            proto = e.slot->proto;
+            gen   = e.slot->gen;
+        }
+        if (proto) break;
+        if (!e.slot->initEvt.wait(g_timeout)) break;
+    }
+    if (!proto) return NULL;
+
+    if (!e.argProto || e.argGen != gen) {
+        Value ap(proto);
+        if (valueIsEnum(proto["value"])) {
+            ap = putOpGet(e, g_timeout);       /* once per channel: the choices */
+            if (!ap) return NULL;
+        }
+        e.argProto = ap;
+        e.argGen   = gen;
+    }
+    return &e;
+}
+
+/* Send `arg` through the cached operation. False means "not usable now" and the
+ * caller should take the one-shot path; err is set only on a real failure. */
+static bool cachedPutTry(const std::string &name, const Value &arg, bool wait,
+                         PvaError &err)
+{
+    std::map<std::string, PutEntry>::iterator it = g_putOps.find(name);
+    if (it == g_putOps.end()) return false;
+    std::shared_ptr<PutSlot> slot(it->second.slot);
+    {
+        std::lock_guard<std::mutex> G(slot->lock);
+        if (!slot->proto || slot->busy || slot->invalid) return false;
+        slot->busy   = true;                   /* only we clear it, in the cb */
+        slot->failed = false;
+        slot->msg.clear();
+    }
+    /* pvxs silently ignores a reExec on an operation that is not Idle, which is
+     * what a channel in the middle of a reconnect looks like. Checking first
+     * keeps that case on the one-shot path (which waits for the connection)
+     * instead of burning a timeout here. */
+    if (!pvaChannelConnected(name)) {
+        {
+            std::lock_guard<std::mutex> G(slot->lock);
+            slot->invalid = true;
+            slot->busy = false;
+        }
+        dropPutEntry(name);
+        return false;
+    }
+    try {
+        it->second.op->reExecPut(arg, [slot](client::Result &&r) {
+            std::lock_guard<std::mutex> G(slot->lock);
+            try { r(); }
+            catch (std::exception &ex) {
+                slot->invalid = true;
+                slot->failed = true;
+                slot->msg = ex.what();
+            }
+            slot->busy = false;
+            slot->doneEvt.signal();
+        });
+    } catch (std::exception &ex) {
+        std::lock_guard<std::mutex> G(slot->lock);
+        slot->busy = false;
+        slot->invalid = true;
+        err.err = PVA_FAILURE;
+        err.msg = std::string("pvaPut '") + name + "': " + ex.what();
+        pvaSetLastError(err.err, err.msg);
+        return true;
+    }
+    if (!wait) return true;   /* fire and forget; busy clears on completion */
+
+    /* Wait for OUR put: `busy` is the predicate (nothing else can have issued
+     * one while it was set), so a leftover doneEvt signal from an earlier
+     * no-wait put on this channel just costs a harmless extra loop. */
+    bool timedOut = false;
+    epicsTime deadline = epicsTime::getCurrent() + g_timeout;
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> G(slot->lock);
+            if (!slot->busy) break;
+        }
+        double remaining = deadline - epicsTime::getCurrent();
+        if (remaining <= 0) { timedOut = true; break; }
+        slot->doneEvt.wait(remaining);
+    }
+    if (timedOut) {
+        /* The put did not happen: report it, and drop the operation so the next
+         * call rebuilds rather than inheriting whatever went wrong. */
+        {
+            std::lock_guard<std::mutex> G(slot->lock);
+            slot->invalid = true;
+        }
+        dropPutEntry(name);
+        err.err = PVA_FAILURE;
+        err.msg = std::string("pvaPut '") + name + "': timeout";
+        pvaSetLastError(err.err, err.msg);
+        return true;
+    }
+    bool        failed;
+    std::string msg;
+    {
+        std::lock_guard<std::mutex> G(slot->lock);
+        failed = slot->failed;
+        msg    = slot->msg;
+    }
+    if (failed) {
+        err.err = PVA_FAILURE;
+        err.msg = std::string("pvaPut '") + name + "': " + msg;
+        pvaSetLastError(err.err, err.msg);
+    }
+    return true;
+}
+
+#endif /* LABPVA_PVXS_CACHED_PUT */
+
+PvValue pvaPutPrototype(const std::string &name, PvaError &err)
+{
+    reapDonePuts();
+#ifdef LABPVA_PVXS_CACHED_PUT
+    PutEntry *e = readyPutEntry(name);
+    if (e) {
+        recordChannel(name);
+        return e->argProto;
+    }
+#endif
+    /* No cached operation (channel silent, or a pvxs without the expert API):
+     * fall back to a fresh whole-structure get for the type. pvaPutExec then
+     * also falls back to a one-shot put, whose pvRequest is likewise the whole
+     * structure, so the argument's layout still matches what is sent. */
+    PvValue v = pvaGet(name, "field()", err);
+    if (err.err != PVA_OK) {
+        /* The caller is putting, not getting: report it as a put failure (the
+         * classic backend's pvaPutPrepare says "pvaPut '<name>': ..." too). */
+        const std::string tag("pvaGet '");
+        if (err.msg.compare(0, tag.size(), tag) == 0)
+            err.msg = "pvaPut '" + err.msg.substr(tag.size());
+        pvaSetLastError(err.err, err.msg);
+    }
+    return v;
+}
+
 void pvaPutExec(const std::string &name, const PvValue &arg, bool wait, PvaError &err)
 {
     reapDonePuts();
+#ifdef LABPVA_PVXS_CACHED_PUT
+    if (cachedPutTry(name, arg, wait, err)) return;
+#endif
     try {
         PvValue argCopy(arg);
         /* fetchPresent(false): the argument was pre-built on the MATLAB thread
-         * from a fresh get (pvaConvert.h mxToPutArg*), so no server fetch is
-         * needed and the build callback -- which runs on a PVXS worker thread
-         * -- only hands back the captured Value (it never touches MATLAB
-         * memory). Only the MARKED fields of the argument are sent. */
+         * against the channel's type (pvaPutPrototype + pvaConvert.h
+         * mxToPutArg*), so no server fetch is needed and the build callback --
+         * which runs on a PVXS worker thread -- only hands back the captured
+         * Value (it never touches MATLAB memory). Only the MARKED fields of
+         * the argument are sent. */
         if (wait) {
             std::shared_ptr<client::Operation> op(
                 context().put(name)

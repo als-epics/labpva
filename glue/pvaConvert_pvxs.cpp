@@ -693,23 +693,24 @@ static void mxIntoValue(const mxArray *mx, Value target, PvaError &err)
     }
 }
 
-PvValue mxToPutArg(const mxArray *mx, const PvValue &fetched, char typeReq, PvaError &err)
+PvValue mxToPutArg(const mxArray *mx, const PvValue &proto, char typeReq, PvaError &err)
 {
     try {                                   /* barrier; body unindented */
     (void)typeReq;                          /* kept for signature parity */
-    if (!fetched) {
+    if (!proto) {
         err.err = PVA_NOFIELD;
         err.msg = "no structure to write";
         return PvValue();
     }
-    Value arg(fetched.cloneEmpty());
+    Value arg(proto.cloneEmpty());
     Value value = arg["value"];
     if (value) {
         /* enum value: accept a numeric index, or a string matched to choices
-         * (read from the FETCHED value -- the empty clone has no data) */
+         * (read from the PROTOTYPE, which the glue fetches with values for an
+         * enum channel -- the empty clone has no data) */
         if (value.type().code == TypeCode::Struct && safeId(value) == "enum_t") {
             shared_array<const std::string> choices;
-            Value ch = fetched["value"]["choices"];
+            Value ch = proto["value"]["choices"];
             if (ch) {
                 try { choices = ch.as<shared_array<const std::string> >(); }
                 catch (std::exception &) {}
@@ -765,10 +766,10 @@ PvValue mxToPutArg(const mxArray *mx, const PvValue &fetched, char typeReq, PvaE
     LABPVA_CONVERT_CATCH(err, PvValue())
 }
 
-PvValue mxToPutArgStructure(const mxArray *mx, const PvValue &fetched, PvaError &err)
+PvValue mxToPutArgStructure(const mxArray *mx, const PvValue &proto, PvaError &err)
 {
     try {
-        if (!fetched) {
+        if (!proto) {
             err.err = PVA_NOFIELD;
             err.msg = "no structure to write";
             return PvValue();
@@ -778,7 +779,7 @@ PvValue mxToPutArgStructure(const mxArray *mx, const PvValue &fetched, PvaError 
             err.msg = "pvaPutStructure: value must be a struct";
             return PvValue();
         }
-        Value arg(fetched.cloneEmpty());
+        Value arg(proto.cloneEmpty());
         mxIntoValue(mx, arg, err);
         return err.err == PVA_OK ? arg : PvValue();
     }

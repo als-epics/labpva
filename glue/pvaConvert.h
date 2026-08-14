@@ -104,21 +104,22 @@ std::string mxToPvValue(const mxArray *mx, const PvValue &pv, char typeReq, PvaE
 
 #else
 /* ---- MATLAB -> PV write path (PVXS backend) ---------------------------
- * pvxs puts send only the MARKED fields of an argument Value. These build
- * that argument on the MATLAB thread from a freshly fetched Value (`fetched`
- * supplies the server's type and, for enums, the choice list): the argument
- * starts as fetched.cloneEmpty() (same type, nothing marked) and assigning
- * from the MATLAB data marks exactly the written fields. The glue then sends
- * it via pvaPutExec (pvaGlue.h). Returns an invalid Value with err set on
+ * pvxs puts send only the MARKED fields of an argument Value. These build that
+ * argument on the MATLAB thread against the channel's type, which the glue
+ * supplies as `proto` (pvaPutPrototype in pvaGlue.h -- for an enum channel it
+ * also carries the choice list): the argument starts as proto.cloneEmpty()
+ * (same type, nothing marked) and assigning from the MATLAB data marks exactly
+ * the written fields. The glue then sends it via pvaPutExec, which is why the
+ * two must be called as a pair. Returns an invalid Value with err set on
  * failure. */
 
 /* pvaPut semantics: write only the `value` field (enum: a choice string or a
  * bounds-checked index; struct value: matched by sanitised field name). */
-PvValue mxToPutArg(const mxArray *mx, const PvValue &fetched, char typeReq, PvaError &err);
+PvValue mxToPutArg(const mxArray *mx, const PvValue &proto, char typeReq, PvaError &err);
 
 /* pvaPutStructure semantics: `mx` mirrors the whole structure; only the fields
  * present in it are written (matched by sanitised name, recursive). */
-PvValue mxToPutArgStructure(const mxArray *mx, const PvValue &fetched, PvaError &err);
+PvValue mxToPutArgStructure(const mxArray *mx, const PvValue &proto, PvaError &err);
 #endif /* !LABPVA_USE_PVXS */
 
 } // namespace labpva
