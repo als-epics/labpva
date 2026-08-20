@@ -30,8 +30,8 @@ MEX_LDFLAGS = LDFLAGS='$$LDFLAGS $(PVA_RPATH) -Wl,-rpath,\$$ORIGIN -Wl,-rpath,$(
 # Every MEX entry point. (pvaPutShared.h / pvaMetaShared.h are headers, not
 # entry points, so they are intentionally not listed.)
 SRCS = \
-	pvaGet.cpp pvaGetStructure.cpp \
-	pvaPut.cpp pvaPutNoWait.cpp pvaPutStructure.cpp \
+	pvaGet.cpp pvaGetTable.cpp pvaGetStructure.cpp \
+	pvaPut.cpp pvaPutTable.cpp pvaPutNoWait.cpp pvaPutStructure.cpp \
 	pvaInfo.cpp \
 	pvaSetMonitor.cpp pvaNewMonitorValue.cpp pvaNewMonitorWait.cpp pvaClear.cpp \
 	pvaMonitors.cpp pvaIsMonitored.cpp pvaChannels.cpp pvaIsConnected.cpp \

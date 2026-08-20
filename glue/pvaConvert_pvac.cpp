@@ -14,6 +14,7 @@
 #include <pv/pvAlarm.h>
 #include <pv/alarm.h>
 
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -284,6 +285,116 @@ mxArray *pvValueToMx(const PVStructurePtr &pv, char typeReq, PvaError &err)
     }
 
     return pvFieldToMx(value, err);
+}
+
+bool pvIsNTTable(const PvValue &pv)
+{
+    if (!pv) return false;
+    const std::string id = pv->getStructure()->getID();
+    const std::string prefix = "epics:nt/NTTable:";
+    return id.compare(0, prefix.size(), prefix) == 0;
+}
+
+mxArray *pvTableToMx(const PvValue &pv, PvaError &err)
+{
+    if (!pvIsNTTable(pv)) {
+        err.err = PVA_TYPEMISMATCH;
+        err.msg = "channel is not an NTTable";
+        return mxCreateDoubleMatrix(0, 0, mxREAL);
+    }
+
+    PVStringArrayPtr labels = pv->getSubField<PVStringArray>("labels");
+    PVStructurePtr value = pv->getSubField<PVStructure>("value");
+    if (!labels || !value) {
+        err.err = PVA_NOFIELD;
+        err.msg = "NTTable must contain labels and a structured value field";
+        return mxCreateDoubleMatrix(0, 0, mxREAL);
+    }
+
+    shared_vector<const std::string> names = labels->view();
+    std::vector<mxArray *> args;
+    args.reserve(names.size() + 2);
+    for (size_t i = 0; i < names.size(); ++i) {
+        PVFieldPtr field = value->getSubField(names[i]);
+        if (!field) {
+            err.err = PVA_NOFIELD;
+            err.msg = std::string("NTTable value is missing column '") + names[i] + "'";
+            break;
+        }
+        mxArray *row = pvFieldToMx(field, err);
+        if (err.err != PVA_OK) {
+            mxDestroyArray(row);
+            break;
+        }
+        if (field->getField()->getType() == scalarArray &&
+            std::tr1::static_pointer_cast<PVScalarArray>(field)
+                ->getScalarArray()->getElementType() == pvString) {
+            mxArray *strings = NULL;
+            mxArray *trap = mexCallMATLABWithTrap(1, &strings, 1, &row, "string");
+            mxDestroyArray(row);
+            if (trap) {
+                mxDestroyArray(trap);
+                err.err = PVA_FAILURE;
+                err.msg = std::string("could not convert NTTable column '") +
+                          names[i] + "' to MATLAB strings";
+                break;
+            }
+            row = strings;
+        }
+        mxArray *column = NULL;
+        mxArray *trap = mexCallMATLABWithTrap(1, &column, 1, &row, "transpose");
+        mxDestroyArray(row);
+        if (trap) {
+            mxDestroyArray(trap);
+            err.err = PVA_FAILURE;
+            err.msg = std::string("could not shape NTTable column '") + names[i] + "'";
+            break;
+        }
+        args.push_back(column);
+    }
+
+    mxArray *table = NULL;
+    if (err.err == PVA_OK) {
+        args.push_back(mxCreateString("VariableNames"));
+        mxArray *nameCell = mxCreateCellMatrix(1, names.size());
+        for (size_t i = 0; i < names.size(); ++i)
+            mxSetCell(nameCell, i, mxCreateString(names[i].c_str()));
+        args.push_back(nameCell);
+        mxArray *trap = mexCallMATLABWithTrap(1, &table, args.size(), &args[0], "table");
+        if (trap) {
+            mxDestroyArray(trap);
+            err.err = PVA_FAILURE;
+            err.msg = "could not construct a MATLAB table from the NTTable columns";
+        }
+    }
+    for (size_t i = 0; i < args.size(); ++i) mxDestroyArray(args[i]);
+    return table ? table : mxCreateDoubleMatrix(0, 0, mxREAL);
+}
+
+void pvValidateTableColumns(const PvValue &pv, const mxArray *columns, PvaError &err)
+{
+    if (!pvIsNTTable(pv) || !columns || !mxIsStruct(columns) ||
+        mxGetNumberOfElements(columns) != 1) {
+        err.err = PVA_TYPEMISMATCH;
+        err.msg = "NTTable value must be a scalar struct of columns";
+        return;
+    }
+    PVStructurePtr value = pv->getSubField<PVStructure>("value");
+    if (!value) {
+        err.err = PVA_NOFIELD;
+        err.msg = "NTTable has no structured value field";
+        return;
+    }
+    std::vector<std::string> valid =
+        legalFieldNames(value->getStructure()->getFieldNames());
+    for (int field = 0; field < mxGetNumberOfFields(columns); ++field) {
+        const char *name = mxGetFieldNameByNumber(columns, field);
+        if (std::find(valid.begin(), valid.end(), name ? name : "") == valid.end()) {
+            err.err = PVA_NOFIELD;
+            err.msg = std::string("NTTable has no column '") + (name ? name : "") + "'";
+            return;
+        }
+    }
 }
 
 void pvTimeStampSecNsec(const PVStructurePtr &pv, double &secOut, double &nsecOut)

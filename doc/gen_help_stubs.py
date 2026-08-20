@@ -39,6 +39,20 @@ VERBS = {
     "dropping the monitor).",
     "pvaGetStructure, pvaPut, pvaSetMonitor, pvaGetStatus, pvaInfo"),
 
+"pvaGetTable": (
+    "Read an NTTable as a native MATLAB table.",
+    ["t              = pvaGetTable(pvName)",
+     "[t, ts]        = pvaGetTable(pvName)       % ts = sec + i*nsec",
+     "[t, ts, alarm] = pvaGetTable(pvName)",
+     "t              = pvaGetTable(pvName, poll) % poll=true: fresh read",
+     "c              = pvaGetTable({pv1,...})    % N-by-1 cell when tables are present"],
+    "For an NTTable, returns a MATLAB table whose variables follow the NTTable "
+    "labels order; string columns are MATLAB string arrays. For a non-NTTable, "
+    "the value and timestamp follow pvaGet, with the standard alarm struct "
+    "available as a third output. A narrow monitor cache is bypassed when it "
+    "does not contain the complete NTTable structure.",
+    "pvaPutTable, pvaGet, pvaGetStructure"),
+
 "pvaGetStructure": (
     "Read a whole pvAccess PVStructure as a nested MATLAB struct.",
     ["s = pvaGetStructure(pvName)",
@@ -72,6 +86,19 @@ VERBS = {
     "every PV in the list, so pvaPut(correctors, 0) zeroes them all without "
     "building a vector of zeros (same broadcast as lcaPut).",
     "pvaPutNoWait, pvaPutStructure, pvaGet"),
+
+"pvaPutTable": (
+    "Write NTTable columns and wait for completion.",
+    ["pvaPutTable(pvName, t)                    % MATLAB table",
+     "pvaPutTable(pvName, s)                    % scalar struct of columns",
+     "pvaPutTable(pvName, field1, value1, ...)  % named column pairs",
+     "pvaPutTable(pvName, value [,type])        % non-NTTable: same as pvaPut"],
+    "Writes only the NTTable value structure. Supplied columns must have equal "
+    "lengths and must name fields in the target NTTable. MATLAB string arrays "
+    "and character matrices are converted to string-array column values. A "
+    "table or struct may be broadcast to a cell array of PV names; a matching "
+    "cell of table/struct values writes one per PV.",
+    "pvaGetTable, pvaPut, pvaPutStructure"),
 
 "pvaPutNoWait": (
     "Write value(s) without waiting for completion (fire-and-forget).",

@@ -1,5 +1,14 @@
 # labpva changelog
 
+## 2026-08-17 — native MATLAB NTTable get/put verbs
+
+Added `pvaGetTable`, which recognises `epics:nt/NTTable:*` and returns its
+label-ordered columns as a MATLAB table plus the standard complex timestamp
+and alarm struct. Added `pvaPutTable`, accepting a MATLAB table, scalar struct
+of columns, or field/value pairs; it validates column names and lengths, writes
+only `value`, and retains `pvaPut` behavior for non-NTTable channels. Both the
+classic pvAccessCPP and PVXS conversion backends implement the same contract.
+
 ## 2026-08-17 — classic backend: pvaGet did TWO network round trips per read
 
 Found by the user's own backend A/B benchmark (30000 ops each way against real

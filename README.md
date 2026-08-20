@@ -25,7 +25,7 @@ EPICS `configure/` layout (like labca): set the two external-product paths in
 [`configure/RELEASE`](configure/RELEASE) — `EPICS_BASE` and `MATLABDIR` — then:
 
 ```sh
-make            # builds the glue lib, the 30 MEX, and the .m help stubs
+make            # builds the glue lib, the 32 MEX, and the .m help stubs
 ```
 
 Site-tunable build knobs (C++ standard, the PVA library list, the OS/compiler
@@ -36,7 +36,7 @@ mechanical/derived settings are assembled in
 
 Products land in `bin/<EPICS_HOST_ARCH>/labpva/` (e.g.
 `bin/RL8-x86_64/labpva/pvaGet.mexa64`), mirroring labca's `bin/<arch>/labca/`
-layout. Alongside the 30 MEX you'll also find **`libmpvaglue.so`** — the shared
+layout. Alongside the 32 MEX you'll also find **`libmpvaglue.so`** — the shared
 glue library that holds the one-per-process channel/monitor registry; every MEX
 links against it (see [ARCHITECTURE.md](ARCHITECTURE.md) §6). After rebuilding,
 **restart MATLAB** to load the new binaries — labpva calls `mexLock` (so the
@@ -64,7 +64,7 @@ protocol, selected in [`configure/RELEASE`](configure/RELEASE):
 
 The MATLAB API is identical either way — the backend split lives entirely in
 `glue/pvaGlue_<backend>.cpp` / `glue/pvaConvert_<backend>.cpp` behind the
-neutral `labpva::PvValue` type (`glue/pvaBackend.h`); the 30 MEX entry points
+neutral `labpva::PvValue` type (`glue/pvaBackend.h`); the 32 MEX entry points
 are backend-agnostic.
 
 **PVXS port status: complete.** Reads (`pvaGet`/`pvaGetStructure`/`pvaInfo` +
@@ -155,6 +155,11 @@ sel = pvaGet('labpva:test:enum')          % NTEnum -> selected choice string
 s   = pvaGet('mdach:circle')              % structured/rich PV -> whole nested struct
 info = pvaInfo('labpva:test:ao')          % type id + field-tree dump (cf. pvinfo)
 
+[t,ts,alarm] = pvaGetTable('TEST:PVA:NTTable')
+pvaPutTable('TEST:PVA:NTTable', ...
+            'name', ["device_1"; "device_2"], ...
+            'number', [1.1; 1.2])
+
 pvaPut('labpva:test:ao', 1.25)            % scalar write, waits for completion (cf. lcaPut)
 pvaPutNoWait('labpva:test:ao', 1.25)      % fire and forget
 pvaPut({'ao1','ao2','ao3'}, [1 2 3])      % list of PVs: one value each
@@ -191,6 +196,32 @@ served from the monitor cache; `pvaGet(pv,true)` / `pvaGetStructure(pv,true)`
 force a fresh server read. Record DB fields **not** carried over pvAccess
 (`NELM`, `NORD`, `FTVL`, …) are read over Channel Access — `lcaGet('PV.NORD')`,
 or `pvaSetProvider('ca')` then `pvaGet('PV.NORD')`.
+
+### Native MATLAB tables
+
+`pvaGetTable` recognises the normative type id `epics:nt/NTTable:*` and returns
+its columns as a MATLAB `table`, in `labels` order. Numeric columns follow
+labpva's normal numeric mapping, boolean columns are logical, and string
+columns are MATLAB string arrays. Its timestamp remains the labpva complex
+`sec + i*nsec`; the third output is `struct(severity,status,message)`.
+
+`pvaPutTable` accepts a MATLAB table, a scalar struct of columns, or named
+field/value pairs. It writes only the NTTable `value` structure, converts to
+the server's native column types, rejects unknown/duplicate fields and unequal
+supplied column lengths, and waits for completion. For example:
+
+```matlab
+names = ["device_1"; "device_2"];
+numbers = [1.1; 1.2];
+
+pvaPutTable('TEST:PVA:NTTable', 'name', names, 'number', numbers);
+pvaPutTable('TEST:PVA:NTTable', table(names, numbers, ...
+  'VariableNames', {'name', 'number'}));
+pvaPutTable('TEST:PVA:NTTable', struct('name', names, 'number', numbers));
+```
+
+For a non-NTTable channel, the two verbs follow `pvaGet` and `pvaPut`
+semantics.
 
 ### Printing / monitoring a whole structure
 
@@ -257,8 +288,10 @@ read past the monitor cache. `help <verb>` gives per-verb detail.
 | function | description |
 | --- | --- |
 | `pvaGet(pv [,type] [,poll])` | Read a channel: the `.value` for a scalar/array/enum, or the whole nested struct for a structured/rich PV. `[v,ts]=…` also returns the timestamp. |
+| `pvaGetTable(pv [,type] [,poll])` | Return an NTTable as a MATLAB table. `[t,ts,alarm]=...` also returns the complex timestamp and alarm struct; non-NTTable values follow `pvaGet`. |
 | `pvaGetStructure(pv [,request] [,poll])` | Always return the **entire** PVStructure as a nested struct (even a scalar's). `request` = pvRequest (default `field()`). |
 | `pvaPut(pv, value [,type])` | Write the `.value` field, **wait** for completion (drop-in for `lcaPut`). Enums accept a choice string or an index. With a cell of names: one value per PV, or a **single value written to all of them** (`pvaPut(correctors, 0)`). |
+| `pvaPutTable(pv, tableOrStruct)` | Write NTTable columns from a table, scalar struct, or field/value pairs; non-NTTable values follow `pvaPut`. |
 | `pvaPutNoWait(pv, value [,type])` | Write without waiting for completion (same argument forms, broadcast included). |
 | `pvaPutStructure(pv, s [,request])` | Write a whole structure from a MATLAB struct; only the fields present in `s` are written (others keep their value). |
 | `pvaInfo(pv)` | Introspect: struct with `.name`, `.typeid`, and a field-tree `.introspection` dump (cf. `pvinfo`). |
@@ -325,7 +358,7 @@ then drive it from MATLAB with the calls above.
 
 ## Status
 
-The 30 MEX and the glue layer build cleanly against **EPICS 7.0.10** and **MATLAB
+The 32 MEX and the glue layer build cleanly against **EPICS 7.0.10** and **MATLAB
 R2025b** (a sibling copy targets R2026a), for both `RL8-x86_64` and
 `linux-x86_64`. labpva is **verified working live** against ALS IOCs: reads
 (`pvaGet`/`pvaGetStructure`), monitors (`pvaSetMonitor` → `pvaNewMonitorValue` →
