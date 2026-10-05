@@ -109,6 +109,14 @@ scalar PV (e.g. to read `value`+`alarm`+`display` together). To make this work,
 the `pvaGet` value verb fetches `field()` (the whole structure), not just
 `field(value,alarm,timeStamp)`.
 
+`pvaGetTable` is the opt-in native-table view: it checks the top-level
+normative type id, orders variables by `labels`, reshapes each column to
+`N-by-1`, and constructs a MATLAB `table` (with MATLAB strings for string
+columns). `pvaPutTable` accepts a table, scalar struct of columns, or named
+field/value pairs and writes only `value`; the target introspection remains
+authoritative for native element types. On non-NTTable channels these verbs
+fall back to `pvaGet`/`pvaPut` behavior.
+
 Metadata getters (`pvaGetControlLimits`, `pvaGetUnits`, ...) read the standard
 NT property sub-fields (`control.*`, `display.*`, `valueAlarm.*`). In CA these
 came from `DBR_CTRL_*` requests; in PVA they are just ordinary sub-fields, so
@@ -171,8 +179,10 @@ distinguish "numeric" from "string"; `C` forces string presentation.)
 | labpva                         | labca analogue          | signature                                              |
 | ------------------------------ | ----------------------- | ------------------------------------------------------ |
 | `pvaGet`                       | `lcaGet`                | `[val,ts] = pvaGet(pv[s] [,type])`                     |
+| `pvaGetTable`                  | — (new)                 | `[table,ts,alarm] = pvaGetTable(pv[s])`                |
 | `pvaGetStructure`              | — (new)                 | `s = pvaGetStructure(pv[s] [,request])`                |
 | `pvaPut`                       | `lcaPut`                | `pvaPut(pv[s], value [,type])`                         |
+| `pvaPutTable`                  | — (new)                 | `pvaPutTable(pv[s], table/struct/field,value,...)`     |
 | `pvaPutNoWait`                 | `lcaPutNoWait`          | `pvaPutNoWait(pv[s], value [,type])`                   |
 | `pvaPutStructure`              | — (new)                 | `pvaPutStructure(pv[s], struct [,request])`            |
 | `pvaInfo`                      | — (new; cf. `pvinfo`)   | `s = pvaInfo(pv)` → `.name/.typeid/.introspection`     |

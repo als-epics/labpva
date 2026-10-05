@@ -2,8 +2,10 @@
 %
 % Read / write
 %   pvaGet              - read a channel's value(s)        [val,ts] = pvaGet(pv[s][,type])
+%   pvaGetTable         - read an NTTable as a native MATLAB table
 %   pvaGetStructure     - read the whole PVStructure as a nested struct
 %   pvaPut              - write value(s), wait for completion
+%   pvaPutTable         - write NTTable table/struct/named columns
 %   pvaPutNoWait        - write value(s), do not wait
 %   pvaPutStructure     - write a whole structure from a MATLAB struct
 %   pvaInfo             - introspect a channel (type id + field-tree dump)

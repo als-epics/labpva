@@ -51,6 +51,18 @@ mxArray *pvStructureToMx(const PvValue &pv, PvaError &err);
  * letters request numeric. Returns a freshly created mxArray. */
 mxArray *pvValueToMx(const PvValue &pv, char typeReq, PvaError &err);
 
+/* True when the top-level normative type id is epics:nt/NTTable:*.
+ * pvaGetTable uses the id rather than guessing from field names. */
+bool pvIsNTTable(const PvValue &pv);
+
+/* Convert an NTTable's value columns to a MATLAB table. Columns follow the
+ * NTTable labels order and are returned as column vectors. */
+mxArray *pvTableToMx(const PvValue &pv, PvaError &err);
+
+/* Validate that every field in a scalar MATLAB struct names a column in the
+ * NTTable value structure. Conversion remains target-type driven. */
+void pvValidateTableColumns(const PvValue &pv, const mxArray *columns, PvaError &err);
+
 /* Read the EPICS timestamp into seconds-past-epoch / nanoseconds (both 0 if
  * the structure has no timeStamp field). The MEX layer packs these into the
  * labca-style complex double (sec + i*nsec) via mglue's complexColumn. */
