@@ -43,6 +43,17 @@ numericElement(const mxArray *mx, size_t i, bool &ok)
     }
 }
 
+/* The value converters read only the real part, so writing a complex value
+ * would silently drop its imaginary part. True (err set) if `mx` is complex. */
+static inline bool
+rejectComplex(const mxArray *mx, PvaError &err)
+{
+    if (!mx || !mxIsComplex(mx)) return false;
+    err.err = PVA_INVALIDARG;
+    err.msg = "complex values cannot be written to a PV";
+    return true;
+}
+
 /* Select the per-PV MATLAB value from the value argument.
  * - single PV                  -> the whole argument
  * - list + cell of N           -> element i
@@ -69,31 +80,33 @@ numericElement(const mxArray *mx, size_t i, bool &ok)
  *
  *   pvaPut('PV', [1 2 3])
  *
- * Returns NULL and sets err on a shape mismatch. */
+ * Complex values are rejected in every form, single PV included.
+ *
+ * Returns NULL and sets err on a shape mismatch or a complex value. */
 static inline const mxArray *
 putValueFor(const mxArray *valArg, size_t i, size_t n, bool wasCell,
             mxArray **scratch, PvaError &err)
 {
     *scratch = NULL;
+    if (rejectComplex(valArg, err)) return NULL;
     if (!wasCell) return valArg;
     if (mxIsCell(valArg)) {
         size_t nv = mxGetNumberOfElements(valArg);
-        if (nv == 1) return mxGetCell(valArg, 0);        /* one value -> all PVs */
-        if (nv != n) {
+        if (nv != 1 && nv != n) {
             err.err = PVA_INVALIDARG;
             err.msg = "value cell must hold one value per PV, or a single "
                       "value to write to all of them";
             return NULL;
         }
-        return mxGetCell(valArg, i);
+        /* Callers walk i from 0: check every element before the first PV is
+         * written, so a complex element cannot leave the list half-written. */
+        if (i == 0)
+            for (size_t k = 0; k < nv; ++k)
+                if (rejectComplex(mxGetCell(valArg, k), err)) return NULL;
+        return mxGetCell(valArg, nv == 1 ? 0 : i);   /* nv == 1: all PVs */
     }
     if (mxIsNumeric(valArg) || mxIsLogical(valArg)) {
         size_t nv = mxGetNumberOfElements(valArg);
-        if (mxIsComplex(valArg)) {
-            err.err = PVA_INVALIDARG;
-            err.msg = "complex values cannot be written to a PV";
-            return NULL;
-        }
         /* Scalar broadcast, or a single-PV list taking the whole argument (a
          * waveform): hand the argument over untouched. */
         if (nv == 1 || n == 1) return valArg;

@@ -89,7 +89,8 @@ VERBS = {
     "numeric vector with numel == number of PVs, or a cell of that length) or "
     "a SINGLE value -- a scalar, a string, a struct -- which is written to "
     "every PV in the list, so pvaPut(correctors, 0) zeroes them all without "
-    "building a vector of zeros (same broadcast as lcaPut).",
+    "building a vector of zeros (same broadcast as lcaPut). Complex values "
+    "are rejected with labpva:invalidArg.",
     "pvaPutNoWait, pvaPutStructure, pvaGet"),
 
 "pvaPutTable": (

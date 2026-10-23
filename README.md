@@ -294,7 +294,7 @@ read past the monitor cache. `help <verb>` gives per-verb detail.
 | `pvaGet(pv [,type] [,poll])` | Read a channel: the `.value` for a scalar/array/enum, or the whole nested struct for a structured/rich PV. `[v,ts]=…` also returns the timestamp. |
 | `pvaGetTable(pv [,type] [,poll])` | Return an NTTable as a MATLAB table. `[t,ts,alarm]=...` also returns the complex timestamp and alarm struct; non-NTTable values follow `pvaGet`. |
 | `pvaGetStructure(pv [,request] [,poll])` | Always return the **entire** PVStructure as a nested struct (even a scalar's). `request` = pvRequest (default `field()`). |
-| `pvaPut(pv, value [,type])` | Write the `.value` field, **wait** for completion (drop-in for `lcaPut`). Enums accept a choice string or an index. With a cell of names: one value per PV, or a **single value written to all of them** (`pvaPut(correctors, 0)`). |
+| `pvaPut(pv, value [,type])` | Write the `.value` field, **wait** for completion (drop-in for `lcaPut`). Enums accept a choice string or an index. With a cell of names: one value per PV, or a **single value written to all of them** (`pvaPut(correctors, 0)`). Complex values are rejected (`labpva:invalidArg`). |
 | `pvaPutTable(pv, tableOrStruct)` | Write NTTable columns from a table, scalar struct, or field/value pairs; non-NTTable values follow `pvaPut`. |
 | `pvaPutNoWait(pv, value [,type])` | Write without waiting for completion (same argument forms, broadcast included). |
 | `pvaPutStructure(pv, s [,request])` | Write a whole structure from a MATLAB struct; only the fields present in `s` are written (others keep their value). |
